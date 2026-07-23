@@ -34,16 +34,8 @@ if __name__ == "__main__":
     print("=" * 50)
     print("Meeting-to-Action Agent")
     print("=" * 50)
-    
+
     try:
-        # Fetch transcript (with user selection)
-        result = fetch_latest_transcript("Sachin Pal")
-        print(f"\n✅ Got recording data:\n{result}")
-        
-        # TODO: Add reasoning, notion, jira steps
-        
+        process_meeting_for_user("Sachin Pal")
     except Exception as e:
         print(f"\n❌ Error:\n{e}")
-    # Demo user 1
-    # process_meeting_for_user("Sachin Pal")
-    # process_meeting_for_user("John Wright")
