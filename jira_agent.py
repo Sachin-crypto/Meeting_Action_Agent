@@ -19,6 +19,8 @@ def file_jira_tickets(identifier: str, action_items: list) -> list:
                 **({"due_date": item["due_date"]} if item.get("due_date") else {}),
             },
         )
-        created.append(result.result or {"summary": summary})
+        # SDK returns tool output on `.data`; older builds used `.result`.
+        payload = getattr(result, "data", None) or getattr(result, "result", None)
+        created.append(payload or {"summary": summary})
 
     return created

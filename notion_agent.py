@@ -17,4 +17,5 @@ def write_notion_summary(identifier: str, structured: dict) -> dict:
         },
     )
 
-    return result.result or {}
+    # SDK returns tool output on `.data`; older builds used `.result`.
+    return getattr(result, "data", None) or getattr(result, "result", None) or {}

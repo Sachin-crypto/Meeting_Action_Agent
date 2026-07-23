@@ -1,127 +1,97 @@
 """
-Zoom integration: fetch meeting transcript using Scalekit.
+Zoom integration: fetch the latest meeting transcript via Scalekit.
+
+Flow:
+  1. zoom_recordings_list  -> recordings that actually exist for the user
+  2. pick the newest recording that has a TRANSCRIPT file
+  3. actions.request()     -> download the .vtt (Scalekit injects the OAuth token)
+  4. parse .vtt            -> plain transcript text
 """
 
-# from scalekit_setup import actions
-# import config
-
-
-# def fetch_latest_transcript(identifier: str) -> str:
-#     """
-#     Fetch latest Zoom recording transcript using Scalekit.
-#     """
-    
-#     print("[Zoom] Fetching latest recordings...")
-    
-#     # Get latest recordings
-#     result = actions.execute_tool(
-#         tool_input={"meeting_id": "764 8394 7356"},
-#         tool_name="zoom_meeting_recordings_get",
-#         connection_name=config.ZOOM_CONNECTION_NAME,
-#         identifier=identifier,
-#     )
-    
-#     print(f"[Zoom] Full response: {result}")
-#     print(f"[Zoom] Result data: {result.result}")
-    
-#     # Check what we got back
-#     payload = result.result or {}
-#     recording_files = payload.get("recording_files", [])
-
-#     for file in recording_files:
-#         if file.get("file_type") in ("TIMELINE", "TRANSCRIPT") or file.get(
-#             "recording_type"
-#         ) == "audio_transcript":
-#             transcript = file.get("file_content") or file.get("download_url", "")
-#             if transcript:
-#                 return transcript
-
-#     raise RuntimeError(
-#         "No transcript found in the latest recording. "
-#         "Ensure cloud recording and transcription are enabled."
-#     )
-
-
-
-"""
-Zoom integration: List meetings, select one, get its recordings
-Using exact Scalekit tool names from docs
-"""
+from urllib.parse import urlparse
 
 from scalekit_setup import actions
 import config
 
 
+def _tool_payload(result) -> dict:
+    # SDK returns tool output on `.data`; older builds used `.result`. Support both.
+    return getattr(result, "data", None) or getattr(result, "result", None) or {}
+
+
+def _parse_vtt(vtt_text: str) -> str:
+    """Strip WEBVTT header, cue numbers, and timestamps; keep spoken lines."""
+    lines = []
+    for raw in vtt_text.splitlines():
+        line = raw.strip()
+        if not line or line == "WEBVTT" or "-->" in line or line.isdigit():
+            continue
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _find_transcript_file(recording_files: list) -> dict | None:
+    for f in recording_files:
+        is_transcript = (
+            f.get("file_type") == "TRANSCRIPT"
+            or f.get("recording_type") == "audio_transcript"
+        )
+        if is_transcript and f.get("download_url"):
+            return f
+    return None
+
+
+def _download_transcript(identifier: str, download_url: str) -> str:
+    # Download through the Scalekit Tool Proxy so the vaulted OAuth token is
+    # injected automatically. proxy_url for Zoom is https://api.zoom.us, so we
+    # pass the download_url's path (+query) relative to that host.
+    parsed = urlparse(download_url)
+    path = parsed.path + (f"?{parsed.query}" if parsed.query else "")
+
+    print(f"[Zoom] Downloading transcript via Tool Proxy: {path}")
+    resp = actions.request(
+        connection_name=config.ZOOM_CONNECTION_NAME,
+        identifier=identifier,
+        method="GET",
+        path=path,
+    )
+
+    vtt = getattr(resp, "content", None) or getattr(resp, "data", None) or ""
+    if isinstance(vtt, bytes):
+        vtt = vtt.decode("utf-8", errors="replace")
+    if not vtt:
+        raise RuntimeError(f"Transcript download returned empty body for {path}")
+
+    return _parse_vtt(vtt)
+
+
 def fetch_latest_transcript(identifier: str) -> str:
-    """
-    Step 1: List meetings
-    Step 2: User selects meeting
-    Step 3: Get recordings for that meeting
-    """
-    
-    print("\n[Zoom] Step 1: Fetching your meetings...")
-    
-    # Step 1: List all meetings
-    meetings_result = actions.execute_tool(
-        tool_input={
-            "user_id": "me",
-            "type": "scheduled"
-        },
-        tool_name="zoom_meetings_list",
-        connection_name=config.ZOOM_CONNECTION_NAME,
-        identifier=identifier,
-    )
-    
-    payload = meetings_result.result or {}
-    meetings = payload.get("meetings", [])
-    
-    if not meetings:
-        raise RuntimeError("❌ No scheduled meetings found")
-    
-    print(f"\n✅ Found {len(meetings)} meetings:\n")
-    
-    # Show list to user
-    for i, meeting in enumerate(meetings, 1):
-        print(f"{i}. {meeting.get('topic')} ({meeting.get('start_time')})")
-    
-    # User selects meeting
-    print()
-    choice = input(f"Select meeting (1-{len(meetings)}): ").strip()
-    
-    try:
-        idx = int(choice) - 1
-        if idx < 0 or idx >= len(meetings):
-            raise ValueError()
-        selected_meeting = meetings[idx]
-    except (ValueError, IndexError):
-        raise RuntimeError("❌ Invalid selection")
-    
-    meeting_id = selected_meeting.get("id")
-    print(f"\n✅ Selected: {selected_meeting.get('topic')}")
-    
-    # Step 2: Get recordings for this meeting
-    print(f"\n[Zoom] Step 2: Fetching recordings for meeting {meeting_id}...")
-    
+    # Step 1: list cloud recordings for the user (NOT scheduled meetings).
+    print("\n[Zoom] Listing cloud recordings...")
     recordings_result = actions.execute_tool(
-        tool_input={
-            "meeting_id": meeting_id
-        },
-        tool_name="zoom_meeting_recordings_get",
+        tool_name="zoom_recordings_list",
         connection_name=config.ZOOM_CONNECTION_NAME,
         identifier=identifier,
+        tool_input={"user_id": "me"},  # optional: {"from": "2026-06-01", "to": "2026-06-30"}
     )
-    
-    print(f"[DEBUG] Recordings response: {recordings_result}")
-    
-    recordings_data = recordings_result.result or {}
-    recordings = recordings_data.get("recording_files", [])
-    
-    if not recordings:
-        raise RuntimeError(f"❌ No recordings found for this meeting")
-    
-    print(f"✅ Found {len(recordings)} recording file(s)")
-    
-    # Return first recording (or show list if multiple)
-    first_recording = recordings[0]
-    
-    return str(first_recording)
+
+    payload = _tool_payload(recordings_result)
+    meetings = payload.get("meetings", [])
+    if not meetings:
+        raise RuntimeError(
+            "No cloud recordings found. Ensure cloud recording + audio "
+            "transcription are enabled and the meeting has finished processing."
+        )
+
+    # Step 2: newest first; find one carrying a TRANSCRIPT file.
+    meetings.sort(key=lambda m: m.get("start_time", ""), reverse=True)
+    for meeting in meetings:
+        transcript_file = _find_transcript_file(meeting.get("recording_files", []))
+        if transcript_file:
+            print(f"[Zoom] Transcript found in: {meeting.get('topic')}")
+            return _download_transcript(identifier, transcript_file["download_url"])
+
+    raise RuntimeError(
+        "Recordings exist but none contain a TRANSCRIPT file. "
+        "Enable 'Audio transcript' in Zoom cloud recording settings."
+    )
